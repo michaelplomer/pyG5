@@ -11,11 +11,11 @@ import binascii
 import os
 from datetime import datetime as datetime_, timedelta
 
-from PyQt5.QtCore import QObject, pyqtSlot, pyqtSignal, QTimer
+from PyQt6.QtCore import QObject, pyqtSlot, pyqtSignal, QTimer
 
-from PyQt5.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket
+from PyQt6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket
 
-from PyQt5 import QtGui
+from PyQt6 import QtGui
 
 
 class pyG5NetWorkManager(QObject):
