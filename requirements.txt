@@ -14,9 +14,10 @@ pre-commit==2.13.0
 pycodestyle==2.7.0
 pydocstyle==5.1.1
 pyflakes==2.3.1
-PyQt6
-PyQt6-Qt6
-PyQt6-sip
+QtPy==2.3.0
+# PyQt6
+# PyQt6-Qt6
+# PyQt6-sip
 PyYAML==5.4.1
 six==1.16.0
 snowballstemmer==2.1.0

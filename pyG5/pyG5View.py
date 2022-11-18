@@ -9,8 +9,13 @@ import logging
 from math import cos, radians, sin, sqrt
 from functools import wraps
 
-from PyQt6.QtCore import QLine, QPoint, QPointF, QRectF, Qt, pyqtSlot
-from PyQt6.QtGui import (
+try:
+    from PyQt6.QtCore import pyqtSlot
+except ImportError:
+    from PyQt5.QtCore import pyqtSlot
+
+from qtpy.QtCore import QLine, QPoint, QPointF, QRectF, Qt
+from qtpy.QtGui import (
     QBrush,
     QPainter,
     QPolygonF,
@@ -18,19 +23,22 @@ from PyQt6.QtGui import (
     QLinearGradient,
     QRadialGradient,
 )
-from PyQt6.QtWidgets import (
+from qtpy.QtWidgets import (
     QWidget,
     QVBoxLayout,
 )
 
-g5Width = 480
-g5CenterX = g5Width / 2
-g5Height = 360
-g5CenterY = g5Height / 2
+G5_WIDTH = 480
+G5_CENTER_X = G5_WIDTH / 2
+G5_HEIGHT = 360
+G5_CENTER_Y = G5_HEIGHT / 2
+HSI_CENTER = 190
 
-g5Diag = sqrt(g5Width**2 + g5Height**2)
+g5Diag = sqrt(G5_WIDTH ** 2 + G5_HEIGHT ** 2)
 
 mstokt = 1.94384
+
+GREY_COLOR = QColor(128, 128, 128, 255)
 
 
 class pyG5DualStack(QWidget):
@@ -48,9 +56,9 @@ class pyG5DualStack(QWidget):
         QWidget.__init__(self, parent)
 
         self.pyG5AI = pyG5AIWidget()
-        self.pyG5AI.setFixedSize(g5Width, g5Height)
+        self.pyG5AI.setFixedSize(G5_WIDTH, G5_HEIGHT)
         self.pyG5HSI = pyG5HSIWidget()
-        self.pyG5HSI.setFixedSize(g5Width, g5Height)
+        self.pyG5HSI.setFixedSize(G5_WIDTH, G5_HEIGHT)
 
         self.vlayout = QVBoxLayout()
         self.vlayout.addWidget(self.pyG5AI)
@@ -63,6 +71,15 @@ class pyG5DualStack(QWidget):
 
 class pyG5Widget(QWidget):
     """Base class for the G5 wdiget view."""
+    gps_cdi_annunciator: str
+    cdi_source: str
+    nav_color: Qt.GlobalColor
+    nav_dft: int
+    nav_from_to: int
+    nav_crs: int
+    gs_available: bool
+    gs_dev: float
+    qp: QPainter
 
     def __init__(self, parent=None):
         """g5Widget Constructor.
@@ -139,11 +156,11 @@ class pyG5Widget(QWidget):
             setattr(self, "_{}".format(prop[0]), prop[1])
             setattr(self, "{}".format(prop[0]), _make_setter(prop[0]))
 
-    def setPen(self, width, color, style=Qt.PenStyle.SolidLine):
+    def setPen(self, width: float, color, style=Qt.PenStyle.SolidLine):
         """Set the pen color and width."""
         pen = self.qp.pen()
         pen.setColor(color)
-        pen.setWidth(width)
+        pen.setWidthF(width)
         pen.setStyle(style)
         self.qp.setPen(pen)
 
@@ -157,20 +174,44 @@ class pyG5Widget(QWidget):
                 self.logger.error("failed to set value {}: {}".format(value[5], e))
         self.repaint()
 
+    def derive_settings(self):
+        self.nav_color = Qt.GlobalColor.green
+        self.gps_cdi_annunciator = ""
+        if int(self._hsiSource) == 2:
+            self.cdi_source = "GPS"
 
-class pyG5HSIWidget(pyG5Widget):
-    """Generate G5 wdiget view."""
+            sensi = round(self._gpshsisens, 1)
+            if sensi <= 0.1:
+                self.gps_cdi_annunciator = "LNAV"
+            elif sensi == 0.12:
+                self.gps_cdi_annunciator = "DEPT"
+            elif sensi == 0.4:
+                self.gps_cdi_annunciator = "TERM"
+            elif sensi == 0.8:
+                self.gps_cdi_annunciator = "ENR"
 
-    def __init__(self, parent=None):
-        """g5Widget Constructor.
+            self.nav_color = Qt.GlobalColor.magenta
+            self.nav_dft = self._gpsdft
+            self.nav_from_to = self._gpsfromto
+            self.nav_crs = self._gpscrs
+            self.gs_available = (self._gpsvnavavailable != -1000) or self._gpsgsavailable
+            self.gs_dev = self._gpsgs
+        elif int(self._hsiSource) == 1:
+            self.cdi_source = "{}".format(self.getNavTypeString(self._nav2type, "2"))
+            self.nav_dft = self._nav2dft
+            self.nav_from_to = self._nav2fromto
+            self.nav_crs = self._nav2crs
+            self.gs_available = self._nav2gsavailable
+            self.gs_dev = self._nav2gs
+        else:
+            self.cdi_source = "{}".format(self.getNavTypeString(self._nav1type, "1"))
+            self.nav_dft = self._nav1dft
+            self.nav_from_to = self._nav1fromto
+            self.nav_crs = self._nav1crs
+            self.gs_available = self._nav1gsavailable
+            self.gs_dev = self._nav1gs
 
-        Args:
-            parent: Parent Widget
-
-        Returns:
-            self
-        """
-        pyG5Widget.__init__(self, parent)
+        print("Derived settings : " + str(self.nav_color))
 
     def getNavTypeString(self, navType, navIndex):
         """getNavTypeString.
@@ -192,15 +233,104 @@ class pyG5HSIWidget(pyG5Widget):
 
         logging.error("Failed to decode navtype")
 
+    def draw_glideslope(self, gsWidth=16, gsHeigth=192, gsFromLeft=20, frame_color=GREY_COLOR, center=HSI_CENTER):
+        # draw the GlideScope
+        if self.gs_available:
+            gsCircleRad = gsWidth - 6
+            gsDiamond = gsWidth
+
+            # Vertical guidance source
+            rect = QRectF(
+                G5_WIDTH - gsFromLeft - gsWidth,
+                center - gsHeigth / 2 - 15,
+                gsWidth,
+                15,
+            )
+
+            font = self.qp.font()
+            font.setPixelSize(12)
+            self.qp.setFont(font)
+            self.setPen(1, self.nav_color)
+
+            vert_source_txt = "G"
+            if int(self._hsiSource) == 2 and self._gpsgsavailable == 0:
+                vert_source_txt = "V"
+
+            self.qp.drawText(rect, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter, vert_source_txt, )
+
+            self.setPen(2 * gsWidth / 16, frame_color)
+            self.qp.setBrush(QBrush(Qt.GlobalColor.transparent))
+
+            self.qp.drawRect(rect)
+
+            # main rectangle
+            self.qp.drawRect(
+                QRectF(
+                    G5_WIDTH - gsFromLeft - gsWidth,
+                    center - gsHeigth / 2,
+                    gsWidth,
+                    gsHeigth,
+                )
+            )
+
+            self.qp.drawLine(
+                QPointF(G5_WIDTH - gsFromLeft - gsWidth, center),
+                QPointF(G5_WIDTH - gsFromLeft, center)
+            )
+
+            for offset in [-70, -35, 35, 70]:
+                self.qp.drawEllipse(
+                    QPointF(
+                        int(G5_WIDTH - gsFromLeft - gsWidth / 2),
+                        int(center + offset),
+                    ),
+                    gsCircleRad / 2,
+                    gsCircleRad / 2,
+                )
+
+            self.setPen(1, Qt.GlobalColor.black)
+            self.qp.setBrush(QBrush(self.nav_color))
+
+            self.qp.translate(
+                G5_WIDTH - gsFromLeft - gsWidth, center + self.gs_dev / 2.5 * gsHeigth / 2
+            )
+            self.qp.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(0, 0),
+                        QPointF(gsDiamond / 2, gsDiamond / 2),
+                        QPointF(gsDiamond, 0),
+                        QPointF(gsDiamond / 2, -gsDiamond / 2),
+                    ]
+                )
+            )
+
+            self.qp.resetTransform()
+
+
+class pyG5HSIWidget(pyG5Widget):
+    """Generate G5 wdiget view."""
+
+    def __init__(self, parent=None):
+        """g5Widget Constructor.
+
+        Args:
+            parent: Parent Widget
+
+        Returns:
+            self
+        """
+        pyG5Widget.__init__(self, parent)
+
     def paintEvent(self, event):
         """Paint the widget."""
+        self.derive_settings()
         self.qp = QPainter(self)
 
-        greyColor = QColor(128, 128, 128, 255)
+        print("start of paint event : " + str(self.nav_color))
         rotatinghsiCircleRadius = 160
         hsiCircleRadius = 90
         hsiTextRadius = 120
-        hsiCenter = 190
         groundTrackDiamondSize = 7
 
         headingBoxWidth = 50
@@ -214,20 +344,20 @@ class pyG5HSIWidget(pyG5Widget):
         # Draw the background
         self.setPen(1, Qt.GlobalColor.black)
         self.qp.setBrush(QBrush(Qt.GlobalColor.black))
-        self.qp.drawRect(0, 0, g5Width, g5Height)
+        self.qp.drawRect(0, 0, G5_WIDTH, G5_HEIGHT)
 
         if self._avionicson == 0:
             self.setPen(1, Qt.GlobalColor.white)
-            self.qp.drawLine(0, 0, g5Width, g5Height)
-            self.qp.drawLine(0, g5Height, g5Width, 0)
+            self.qp.drawLine(0, 0, G5_WIDTH, G5_HEIGHT)
+            self.qp.drawLine(0, G5_HEIGHT, G5_WIDTH, 0)
             self.qp.end()
             return
 
         # Draw the Horizontal Situation Indicator circle
-        self.setPen(2, greyColor)
+        self.setPen(2, GREY_COLOR)
 
         # offset the center to the Horizontal Situation Indicator center
-        self.qp.translate(g5CenterX, hsiCenter)
+        self.qp.translate(G5_CENTER_X, HSI_CENTER)
 
         self.qp.drawArc(
             -hsiCircleRadius,
@@ -324,51 +454,11 @@ class pyG5HSIWidget(pyG5Widget):
         )
 
         self.setPen(1, Qt.GlobalColor.black)
-        gpscdianonciator = ""
-        if int(self._hsiSource) == 2:
-            cdiSource = "GPS"
 
-            sensi = round(self._gpshsisens, 1)
-            if sensi <= 0.1:
-                gpscdianonciator = "LNAV"
-            elif sensi == 0.12:
-                gpscdianonciator = "DEPT"
-            elif sensi == 0.4:
-                gpscdianonciator = "TERM"
-            elif sensi == 0.8:
-                gpscdianonciator = "ENR"
-            else:
-                gpscdianonciator = ""
-
-            navColor = Qt.GlobalColor.magenta
-            navdft = self._gpsdft
-            navfromto = self._gpsfromto
-            navcrs = self._gpscrs
-            if (self._gpsvnavavailable != -1000) or self._gpsgsavailable:
-                vertAvailable = 1
-            else:
-                vertAvailable = 0
-            gsDev = self._gpsgs
-        elif int(self._hsiSource) == 1:
-            cdiSource = "{}".format(self.getNavTypeString(self._nav2type, "2"))
-            navColor = Qt.GlobalColor.green
-            navdft = self._nav2dft
-            navfromto = self._nav2fromto
-            navcrs = self._nav2crs
-            vertAvailable = self._nav2gsavailable
-            gsDev = self._nav2gs
-        else:
-            cdiSource = "{}".format(self.getNavTypeString(self._nav1type, "1"))
-            navColor = Qt.GlobalColor.green
-            navdft = self._nav1dft
-            navfromto = self._nav1fromto
-            navcrs = self._nav1crs
-            vertAvailable = self._nav1gsavailable
-            gsDev = self._nav1gs
-
-        self.qp.setBrush(QBrush(navColor))
+        print("CDI : " + str(self.nav_color))
+        self.qp.setBrush(QBrush(self.nav_color))
         # Draw the CDI
-        self.qp.rotate(90 - self._headingBug + navcrs)
+        self.qp.rotate(90 - self._headingBug + self.nav_crs)
 
         # CDI arrow
         self.qp.drawPolygon(
@@ -396,10 +486,10 @@ class pyG5HSIWidget(pyG5Widget):
             )
         )
         # CDI deflection bar
-        if int(navfromto) != 0:
+        if int(self.nav_from_to) != 0:
             hsiDeflectionBound = hsiCircleRadius / 75 * 2
             deflection = (
-                max(min(navdft, hsiDeflectionBound), -hsiDeflectionBound) / 2 * 75
+                    max(min(self.nav_dft, hsiDeflectionBound), -hsiDeflectionBound) / 2 * 75
             )
             self.qp.drawPolygon(
                 QPolygonF(
@@ -414,7 +504,7 @@ class pyG5HSIWidget(pyG5Widget):
 
             # NAV1 FromTo
             fromToTipX = 65
-            if int(navfromto) == 2:
+            if int(self.nav_from_to) == 2:
                 self.qp.rotate(180)
 
             self.qp.drawPolygon(
@@ -427,7 +517,7 @@ class pyG5HSIWidget(pyG5Widget):
                     ]
                 )
             )
-            if int(navfromto) == 2:
+            if int(self.nav_from_to) == 2:
                 self.qp.rotate(180)
 
         self.qp.rotate(90)
@@ -453,22 +543,20 @@ class pyG5HSIWidget(pyG5Widget):
         font.setPixelSize(15)
         font.setBold(False)
         self.qp.setFont(font)
-        if int(self._hsiSource) == 2:
-            self.setPen(2, Qt.GlobalColor.magenta)
-        else:
-            self.setPen(2, Qt.GlobalColor.green)
+
+        self.setPen(2, self.nav_color)
 
         self.qp.drawText(
-            QRectF(g5CenterX - 70, hsiCenter - 50, 65, 18),
+            QRectF(G5_CENTER_X - 70, HSI_CENTER - 50, 65, 18),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            cdiSource,
+            self.cdi_source,
         )
 
-        if len(gpscdianonciator):
+        if len(self.gps_cdi_annunciator):
             self.qp.drawText(
-                QRectF(g5CenterX + 25, hsiCenter - 50, 65, 18),
+                QRectF(G5_CENTER_X + 25, HSI_CENTER - 50, 65, 18),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                gpscdianonciator,
+                self.gps_cdi_annunciator,
             )
 
         # Draw the heading Bug indicator bottom corner
@@ -477,7 +565,7 @@ class pyG5HSIWidget(pyG5Widget):
 
         headingWidth = 105
         headingHeigth = 30
-        self.qp.drawRect(QRectF(g5Width, g5Height, -headingWidth, -headingHeigth))
+        self.qp.drawRect(QRectF(G5_WIDTH, G5_HEIGHT, -headingWidth, -headingHeigth))
 
         # draw the bug symbol
         self.setPen(1, Qt.GlobalColor.cyan)
@@ -509,9 +597,9 @@ class pyG5HSIWidget(pyG5Widget):
             font.setPixelSize(12)
             font.setBold(False)
             self.qp.setFont(font)
-            distRect = QRectF(g5Width - 105, 0, 105, 45)
+            distRect = QRectF(G5_WIDTH - 105, 0, 105, 45)
 
-            self.setPen(2, greyColor)
+            self.setPen(2, GREY_COLOR)
             self.qp.setBrush(QBrush(Qt.GlobalColor.black))
             self.qp.drawRect(distRect)
 
@@ -524,9 +612,9 @@ class pyG5HSIWidget(pyG5Widget):
             font.setPixelSize(18)
             font.setBold(True)
             self.qp.setFont(font)
-            self.setPen(1, navColor)
+            self.setPen(1, self.nav_color)
 
-            distRect = QRectF(g5Width - 105, 12, 105, 45 - 12)
+            distRect = QRectF(G5_WIDTH - 105, 12, 105, 45 - 12)
             self.qp.drawText(
                 distRect,
                 Qt.AlignmentFlag.AlignCenter,
@@ -540,7 +628,7 @@ class pyG5HSIWidget(pyG5Widget):
         self.qp.setFont(font)
 
         # draw the wind box
-        self.setPen(2, greyColor)
+        self.setPen(2, GREY_COLOR)
         self.qp.setBrush(QBrush(Qt.GlobalColor.black))
 
         self.qp.drawRect(0, 0, 105, 45)
@@ -581,25 +669,25 @@ class pyG5HSIWidget(pyG5Widget):
         )
 
         # Draw the magnetic heading box
-        self.setPen(2, greyColor)
+        self.setPen(2, GREY_COLOR)
         self.qp.setBrush(QBrush(Qt.GlobalColor.black))
         self.qp.drawPolygon(
             QPolygonF(
                 [
-                    QPointF(g5CenterX - headingBoxWidth / 2, 1),
-                    QPointF(g5CenterX - headingBoxWidth / 2, headingBoxHeight),
-                    QPointF(g5CenterX - 6, headingBoxHeight),
-                    QPointF(g5CenterX, headingBoxHeight + 8),
-                    QPointF(g5CenterX + 6, headingBoxHeight),
-                    QPointF(g5CenterX + headingBoxWidth / 2, headingBoxHeight),
-                    QPointF(g5CenterX + headingBoxWidth / 2, 1),
+                    QPointF(G5_CENTER_X - headingBoxWidth / 2, 1),
+                    QPointF(G5_CENTER_X - headingBoxWidth / 2, headingBoxHeight),
+                    QPointF(G5_CENTER_X - 6, headingBoxHeight),
+                    QPointF(G5_CENTER_X, headingBoxHeight + 8),
+                    QPointF(G5_CENTER_X + 6, headingBoxHeight),
+                    QPointF(G5_CENTER_X + headingBoxWidth / 2, headingBoxHeight),
+                    QPointF(G5_CENTER_X + headingBoxWidth / 2, 1),
                 ]
             )
         )
 
         self.qp.drawText(
             QRectF(
-                g5CenterX - headingBoxWidth / 2, 1, headingBoxWidth, headingBoxHeight
+                G5_CENTER_X - headingBoxWidth / 2, 1, headingBoxWidth, headingBoxHeight
             ),
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
             "{:03d}˚".format(int(self._magHeading)),
@@ -608,7 +696,7 @@ class pyG5HSIWidget(pyG5Widget):
         # Draw the ground track
         self.setPen(0, Qt.GlobalColor.transparent)
         self.qp.setBrush(QBrush(Qt.GlobalColor.magenta))
-        self.qp.translate(g5CenterX, hsiCenter)
+        self.qp.translate(G5_CENTER_X, HSI_CENTER)
         self.qp.rotate(-self._magHeading + self._groundTrack)
         self.qp.drawPolygon(
             QPolygonF(
@@ -625,7 +713,7 @@ class pyG5HSIWidget(pyG5Widget):
                 ]
             )
         )
-        self.setPen(3, greyColor, Qt.PenStyle.DashLine)
+        self.setPen(3, GREY_COLOR, Qt.PenStyle.DashLine)
         self.qp.drawLine(0, 0, 0, -rotatinghsiCircleRadius)
         self.qp.resetTransform()
 
@@ -658,96 +746,17 @@ class pyG5HSIWidget(pyG5Widget):
             )
         )
 
-        # draw the GlideScope
-        gsWidth = 16
-        gsHeigth = 192
-        gsCircleRad = 10
-        gsFromLeft = 20
-        gsDiamond = 16
-
-        if vertAvailable:
-            # Vertical guidance source
-            rect = QRectF(
-                g5Width - gsFromLeft - gsWidth,
-                hsiCenter - gsHeigth / 2 - 15,
-                gsWidth,
-                15,
-            )
-
-            font.setPixelSize(12)
-            self.qp.setFont(font)
-            self.setPen(1, navColor)
-
-            vertSourceTxt = "G"
-            if int(self._hsiSource) == 2 and self._gpsgsavailable == 0:
-                vertSourceTxt = "V"
-
-            self.qp.drawText(
-                rect,
-                Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
-                vertSourceTxt,
-            )
-
-            self.setPen(2, greyColor)
-            self.qp.setBrush(QBrush(Qt.GlobalColor.transparent))
-
-            self.qp.drawRect(rect)
-
-            # main rectangle
-            self.qp.drawRect(
-                QRectF(
-                    g5Width - gsFromLeft - gsWidth,
-                    hsiCenter - gsHeigth / 2,
-                    gsWidth,
-                    gsHeigth,
-                )
-            )
-
-            self.qp.drawLine(
-                g5Width - gsFromLeft - gsWidth,
-                hsiCenter,
-                g5Width - gsFromLeft,
-                hsiCenter,
-            )
-
-            for offset in [-70, -35, 35, 70]:
-                self.qp.drawEllipse(
-                    QPointF(
-                        int(g5Width - gsFromLeft - gsWidth / 2),
-                        int(hsiCenter + offset),
-                    ),
-                    gsCircleRad / 2,
-                    gsCircleRad / 2,
-                )
-
-            self.setPen(1, Qt.GlobalColor.black)
-            self.qp.setBrush(QBrush(navColor))
-
-            self.qp.translate(
-                g5Width - gsFromLeft - gsWidth, hsiCenter + gsDev / 2.5 * gsHeigth / 2
-            )
-            self.qp.drawPolygon(
-                QPolygonF(
-                    [
-                        QPointF(0, 0),
-                        QPointF(gsDiamond / 2, gsDiamond / 2),
-                        QPointF(gsDiamond, 0),
-                        QPointF(gsDiamond / 2, -gsDiamond / 2),
-                    ]
-                )
-            )
-
-            self.qp.resetTransform()
+        self.draw_glideslope()
 
         # draw the CRS selection
 
         crsBoxHeight = 30
         crsBoxWidth = 105
 
-        self.setPen(2, greyColor)
+        self.setPen(2, GREY_COLOR)
         self.qp.setBrush(QBrush(Qt.GlobalColor.black))
 
-        rect = QRectF(0, g5Height - crsBoxHeight, crsBoxWidth, crsBoxHeight)
+        rect = QRectF(0, G5_HEIGHT - crsBoxHeight, crsBoxWidth, crsBoxHeight)
         self.qp.drawRect(rect)
 
         self.setPen(1, Qt.GlobalColor.white)
@@ -756,19 +765,17 @@ class pyG5HSIWidget(pyG5Widget):
         font.setPixelSize(15)
         self.qp.setFont(font)
 
-        rect = QRectF(1, g5Height - crsBoxHeight + 1, crsBoxWidth - 2, crsBoxHeight - 2)
+        rect = QRectF(1, G5_HEIGHT - crsBoxHeight + 1, crsBoxWidth - 2, crsBoxHeight - 2)
         self.qp.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, "CRS")
 
         font = self.qp.font()
         font.setPixelSize(25)
         self.qp.setFont(font)
-        if int(self._hsiSource) == 2:
-            self.setPen(1, Qt.GlobalColor.magenta)
-        else:
-            self.setPen(1, Qt.GlobalColor.green)
-        rect = QRectF(40, g5Height - crsBoxHeight + 1, 65, crsBoxHeight - 2)
+
+        self.setPen(1, self.nav_color)
+        rect = QRectF(40, G5_HEIGHT - crsBoxHeight + 1, 65, crsBoxHeight - 2)
         self.qp.drawText(
-            rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "{:03d}˚".format(int(navcrs))
+            rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "{:03d}˚".format(int(self.nav_crs))
         )
 
         self.qp.end()
@@ -789,11 +796,13 @@ class pyG5AIWidget(pyG5Widget):
         pyG5Widget.__init__(self, parent)
 
         # parameters
-        self.rollArcRadius = g5CenterY * 0.8
+        self.rollArcRadius = G5_CENTER_Y * 0.8
         self._pitchScale = 25
 
     def paintEvent(self, event):
         """Paint the widget."""
+        self.derive_settings()
+        diamondHeight = 14
         diamondHeight = 14
         diamondWidth = 14
 
@@ -802,10 +811,10 @@ class pyG5AIWidget(pyG5Widget):
         if self._avionicson == 0:
             self.setPen(1, Qt.GlobalColor.black)
             self.qp.setBrush(QBrush(Qt.GlobalColor.black))
-            self.qp.drawRect(0, 0, g5Width, g5Height)
+            self.qp.drawRect(0, 0, G5_WIDTH, G5_HEIGHT)
             self.setPen(1, Qt.GlobalColor.white)
-            self.qp.drawLine(0, 0, g5Width, g5Height)
-            self.qp.drawLine(0, g5Height, g5Width, 0)
+            self.qp.drawLine(0, 0, G5_WIDTH, G5_HEIGHT)
+            self.qp.drawLine(0, G5_HEIGHT, G5_WIDTH, 0)
             self.qp.end()
             return
 
@@ -816,23 +825,23 @@ class pyG5AIWidget(pyG5Widget):
         self.qp.setFont(font)
 
         self.setPen(1, Qt.GlobalColor.white)
-        grad = QLinearGradient(g5CenterX, g5Height, g5CenterX, 0)
+        grad = QLinearGradient(G5_CENTER_X, G5_HEIGHT, G5_CENTER_X, 0)
         grad.setColorAt(1, QColor(0, 50, 200, 255))
         grad.setColorAt(0, QColor(0, 255, 255, 255))
         self.qp.setBrush(grad)
 
         # draw contour + backgorun sky
-        self.qp.drawRect(QRectF(0, 0, g5Width, g5Height))
+        self.qp.drawRect(QRectF(0, 0, G5_WIDTH, G5_HEIGHT))
 
         # draw the rotating part depending on the roll angle
-        self.qp.translate(g5CenterX, g5CenterY)
+        self.qp.translate(G5_CENTER_X, G5_CENTER_Y)
         self.qp.rotate(-self._rollAngle)
 
         # draw the ground
         grad = QLinearGradient(
-            g5CenterX,
-            +self._pitchAngle / self._pitchScale * g5CenterY,
-            g5CenterX,
+            G5_CENTER_X,
+            +self._pitchAngle / self._pitchScale * G5_CENTER_Y,
+            G5_CENTER_X,
             +g5Diag,
         )
         grad.setColorAt(0, QColor(152, 103, 45))
@@ -843,7 +852,7 @@ class pyG5AIWidget(pyG5Widget):
             QRectF(
                 QPointF(
                     -g5Diag,
-                    +self._pitchAngle / self._pitchScale * g5CenterY,
+                    +self._pitchAngle / self._pitchScale * G5_CENTER_Y,
                 ),
                 QPointF(
                     +g5Diag,
@@ -860,8 +869,8 @@ class pyG5AIWidget(pyG5Widget):
         while height < self.rollArcRadius - 40:
             pitch += 2.5
             height = (
-                pitch / self._pitchScale * g5CenterY
-                + self._pitchAngle / self._pitchScale * g5CenterY
+                    pitch / self._pitchScale * G5_CENTER_Y
+                    + self._pitchAngle / self._pitchScale * G5_CENTER_Y
             )
             self.qp.drawLine(
                 QPointF(
@@ -885,8 +894,8 @@ class pyG5AIWidget(pyG5Widget):
         while height > -self.rollArcRadius + 30:
             pitch -= 2.5
             height = (
-                pitch / self._pitchScale * g5CenterY
-                + self._pitchAngle / self._pitchScale * g5CenterY
+                    pitch / self._pitchScale * G5_CENTER_Y
+                    + self._pitchAngle / self._pitchScale * G5_CENTER_Y
             )
             self.qp.drawLine(
                 QPointF(
@@ -955,14 +964,14 @@ class pyG5AIWidget(pyG5Widget):
 
         fixedDiamond = QPolygonF(
             [
-                QPointF(g5CenterX, g5CenterY - self.rollArcRadius + 2),
+                QPointF(G5_CENTER_X, G5_CENTER_Y - self.rollArcRadius + 2),
                 QPointF(
-                    g5CenterX + diamondWidth / 2,
-                    g5CenterY - self.rollArcRadius + diamondHeight,
+                    G5_CENTER_X + diamondWidth / 2,
+                    G5_CENTER_Y - self.rollArcRadius + diamondHeight,
                 ),
                 QPointF(
-                    g5CenterX - diamondWidth / 2,
-                    g5CenterY - self.rollArcRadius + diamondHeight,
+                    G5_CENTER_X - diamondWidth / 2,
+                    G5_CENTER_Y - self.rollArcRadius + diamondHeight,
                 ),
             ]
         )
@@ -978,9 +987,9 @@ class pyG5AIWidget(pyG5Widget):
         # solid polygon left
         nose = QPolygonF(
             [
-                QPointF(g5CenterX - 1, g5CenterY + 1),
-                QPointF(g5CenterX - 75, g5CenterY + 38),
-                QPointF(g5CenterX - 54, g5CenterY + 38),
+                QPointF(G5_CENTER_X - 1, G5_CENTER_Y + 1),
+                QPointF(G5_CENTER_X - 75, G5_CENTER_Y + 38),
+                QPointF(G5_CENTER_X - 54, G5_CENTER_Y + 38),
             ]
         )
         self.qp.drawPolygon(nose)
@@ -988,9 +997,9 @@ class pyG5AIWidget(pyG5Widget):
         # solid polygon right
         nose = QPolygonF(
             [
-                QPointF(g5CenterX + 1, g5CenterY + 1),
-                QPointF(g5CenterX + 75, g5CenterY + 38),
-                QPointF(g5CenterX + 54, g5CenterY + 38),
+                QPointF(G5_CENTER_X + 1, G5_CENTER_Y + 1),
+                QPointF(G5_CENTER_X + 75, G5_CENTER_Y + 38),
+                QPointF(G5_CENTER_X + 54, G5_CENTER_Y + 38),
             ]
         )
         self.qp.drawPolygon(nose)
@@ -998,11 +1007,11 @@ class pyG5AIWidget(pyG5Widget):
         # solid marker left
         marker = QPolygonF(
             [
-                QPointF(120, g5CenterY - 5),
-                QPointF(155, g5CenterY - 5),
-                QPointF(160, g5CenterY),
-                QPointF(155, g5CenterY + 5),
-                QPointF(120, g5CenterY + 5),
+                QPointF(120, G5_CENTER_Y - 5),
+                QPointF(155, G5_CENTER_Y - 5),
+                QPointF(160, G5_CENTER_Y),
+                QPointF(155, G5_CENTER_Y + 5),
+                QPointF(120, G5_CENTER_Y + 5),
             ]
         )
         self.qp.drawPolygon(marker)
@@ -1010,11 +1019,11 @@ class pyG5AIWidget(pyG5Widget):
         # solid marker right
         marker = QPolygonF(
             [
-                QPointF(360, g5CenterY - 5),
-                QPointF(325, g5CenterY - 5),
-                QPointF(320, g5CenterY),
-                QPointF(325, g5CenterY + 5),
-                QPointF(360, g5CenterY + 5),
+                QPointF(360, G5_CENTER_Y - 5),
+                QPointF(325, G5_CENTER_Y - 5),
+                QPointF(320, G5_CENTER_Y),
+                QPointF(325, G5_CENTER_Y + 5),
+                QPointF(360, G5_CENTER_Y + 5),
             ]
         )
         self.qp.drawPolygon(marker)
@@ -1025,9 +1034,9 @@ class pyG5AIWidget(pyG5Widget):
         # cross pattern polygon left
         nose = QPolygonF(
             [
-                QPointF(g5CenterX - 2, g5CenterY + 2),
-                QPointF(g5CenterX - 33, g5CenterY + 38),
-                QPointF(g5CenterX - 54, g5CenterY + 38),
+                QPointF(G5_CENTER_X - 2, G5_CENTER_Y + 2),
+                QPointF(G5_CENTER_X - 33, G5_CENTER_Y + 38),
+                QPointF(G5_CENTER_X - 54, G5_CENTER_Y + 38),
             ]
         )
         self.qp.drawPolygon(nose)
@@ -1035,9 +1044,9 @@ class pyG5AIWidget(pyG5Widget):
         # cross pattern polygon right
         nose = QPolygonF(
             [
-                QPointF(g5CenterX + 2, g5CenterY + 2),
-                QPointF(g5CenterX + 33, g5CenterY + 38),
-                QPointF(g5CenterX + 54, g5CenterY + 38),
+                QPointF(G5_CENTER_X + 2, G5_CENTER_Y + 2),
+                QPointF(G5_CENTER_X + 33, G5_CENTER_Y + 38),
+                QPointF(G5_CENTER_X + 54, G5_CENTER_Y + 38),
             ]
         )
         self.qp.drawPolygon(nose)
@@ -1046,20 +1055,20 @@ class pyG5AIWidget(pyG5Widget):
         # solid polygon right
         nose = QPolygonF(
             [
-                QPointF(120, g5CenterY),
-                QPointF(160, g5CenterY),
-                QPointF(155, g5CenterY + 5),
-                QPointF(120, g5CenterY + 5),
+                QPointF(120, G5_CENTER_Y),
+                QPointF(160, G5_CENTER_Y),
+                QPointF(155, G5_CENTER_Y + 5),
+                QPointF(120, G5_CENTER_Y + 5),
             ]
         )
         self.qp.drawPolygon(nose)
         # solid polygon right
         nose = QPolygonF(
             [
-                QPointF(360, g5CenterY),
-                QPointF(320, g5CenterY),
-                QPointF(325, g5CenterY + 5),
-                QPointF(360, g5CenterY + 5),
+                QPointF(360, G5_CENTER_Y),
+                QPointF(320, G5_CENTER_Y),
+                QPointF(325, G5_CENTER_Y + 5),
+                QPointF(360, G5_CENTER_Y + 5),
             ]
         )
         self.qp.drawPolygon(nose)
@@ -1080,10 +1089,9 @@ class pyG5AIWidget(pyG5Widget):
         self.setPen(0, Qt.GlobalColor.transparent)
 
         self.qp.setBrush(QBrush(QColor(0, 0, 0, 90)))
-        self.qp.drawRect(QRectF(0, 0, speedBoxLeftAlign + speedBoxWdith + 15, g5Height))
+        self.qp.drawRect(QRectF(0, 0, speedBoxLeftAlign + speedBoxWdith + 15, G5_HEIGHT))
 
         if (self._kias + tapeScale / 2) > self._vne:
-
             brush = QBrush(QColor(Qt.GlobalColor.red))
             self.qp.setBrush(brush)
 
@@ -1092,47 +1100,44 @@ class pyG5AIWidget(pyG5Widget):
                     speedBoxLeftAlign + speedBoxWdith + 8,
                     0,
                     8,
-                    (1 - 2 * (self._vne - self._kias) / tapeScale) * g5CenterY,
+                    (1 - 2 * (self._vne - self._kias) / tapeScale) * G5_CENTER_Y,
                 )
             )
 
         if (self._kias + tapeScale / 2) > self._vno:
-
             brush = QBrush(QColor(Qt.GlobalColor.yellow))
             self.qp.setBrush(brush)
 
             self.qp.drawRect(
                 QRectF(
                     speedBoxLeftAlign + speedBoxWdith + 8,
-                    (1 - 2 * (self._vne - self._kias) / tapeScale) * g5CenterY,
+                    (1 - 2 * (self._vne - self._kias) / tapeScale) * G5_CENTER_Y,
                     8,
-                    (2 * (self._vne - self._vno) / tapeScale) * g5CenterY,
+                    (2 * (self._vne - self._vno) / tapeScale) * G5_CENTER_Y,
                 )
             )
 
         if (self._kias + tapeScale / 2) > self._vs:
-
             brush = QBrush(QColor(Qt.GlobalColor.green))
             self.qp.setBrush(brush)
             self.qp.drawRect(
                 QRectF(
                     speedBoxLeftAlign + speedBoxWdith + 8,
-                    max(0, (1 - 2 * (self._vno - self._kias) / tapeScale) * g5CenterY),
+                    max(0, (1 - 2 * (self._vno - self._kias) / tapeScale) * G5_CENTER_Y),
                     8,
-                    (1 - 2 * (self._vs - self._kias) / tapeScale) * g5CenterY,
+                    (1 - 2 * (self._vs - self._kias) / tapeScale) * G5_CENTER_Y,
                 )
             )
 
         if (self._kias + tapeScale / 2) > self._vs:
-
             brush = QBrush(QColor(Qt.GlobalColor.white))
             self.qp.setBrush(brush)
             self.qp.drawRect(
                 QRectF(
                     speedBoxLeftAlign + speedBoxWdith + 13,
-                    max(0, (1 - 2 * (self._vfe - self._kias) / tapeScale) * g5CenterY),
+                    max(0, (1 - 2 * (self._vfe - self._kias) / tapeScale) * G5_CENTER_Y),
                     3,
-                    (1 - 2 * (self._vs0 - self._kias) / tapeScale) * g5CenterY,
+                    (1 - 2 * (self._vs0 - self._kias) / tapeScale) * G5_CENTER_Y,
                 )
             )
 
@@ -1150,8 +1155,8 @@ class pyG5AIWidget(pyG5Widget):
             if (currentTape % 10) == 0:
 
                 tapeHeight = (
-                    1 - 2 * (currentTape - self._kias) / tapeScale
-                ) * g5CenterY
+                                     1 - 2 * (currentTape - self._kias) / tapeScale
+                             ) * G5_CENTER_Y
                 self.qp.drawLine(
                     QPointF(speedBoxLeftAlign + speedBoxWdith + 5, tapeHeight),
                     QPointF(speedBoxLeftAlign + speedBoxWdith + 15, tapeHeight),
@@ -1172,11 +1177,11 @@ class pyG5AIWidget(pyG5Widget):
                 self.qp.drawLine(
                     QPointF(
                         speedBoxLeftAlign + speedBoxWdith + 8,
-                        (1 - 2 * (currentTape - self._kias) / tapeScale) * g5CenterY,
+                        (1 - 2 * (currentTape - self._kias) / tapeScale) * G5_CENTER_Y,
                     ),
                     QPointF(
                         speedBoxLeftAlign + speedBoxWdith + 15,
-                        (1 - 2 * (currentTape - self._kias) / tapeScale) * g5CenterY,
+                        (1 - 2 * (currentTape - self._kias) / tapeScale) * G5_CENTER_Y,
                     ),
                 )
 
@@ -1184,26 +1189,26 @@ class pyG5AIWidget(pyG5Widget):
 
         speedBox = QPolygonF(
             [
-                QPointF(speedBoxLeftAlign, g5CenterY + speedBoxHeight / 2),
+                QPointF(speedBoxLeftAlign, G5_CENTER_Y + speedBoxHeight / 2),
                 QPointF(
-                    speedBoxLeftAlign + speedBoxWdith, g5CenterY + speedBoxHeight / 2
+                    speedBoxLeftAlign + speedBoxWdith, G5_CENTER_Y + speedBoxHeight / 2
                 ),
                 QPointF(
                     speedBoxLeftAlign + speedBoxWdith,
-                    g5CenterY + speedBoxSpikedimension,
+                    G5_CENTER_Y + speedBoxSpikedimension,
                 ),
                 QPointF(
                     speedBoxLeftAlign + speedBoxWdith + speedBoxSpikedimension,
-                    g5CenterY,
+                    G5_CENTER_Y,
                 ),
                 QPointF(
                     speedBoxLeftAlign + speedBoxWdith,
-                    g5CenterY - speedBoxSpikedimension,
+                    G5_CENTER_Y - speedBoxSpikedimension,
                 ),
                 QPointF(
-                    speedBoxLeftAlign + speedBoxWdith, g5CenterY - speedBoxHeight / 2
+                    speedBoxLeftAlign + speedBoxWdith, G5_CENTER_Y - speedBoxHeight / 2
                 ),
-                QPointF(speedBoxLeftAlign, g5CenterY - speedBoxHeight / 2),
+                QPointF(speedBoxLeftAlign, G5_CENTER_Y - speedBoxHeight / 2),
             ]
         )
 
@@ -1222,7 +1227,7 @@ class pyG5AIWidget(pyG5Widget):
         self.qp.drawText(
             QRectF(
                 speedBoxLeftAlign,
-                g5CenterY - speedBoxHeight / 2,
+                G5_CENTER_Y - speedBoxHeight / 2,
                 speedBoxWdith,
                 speedBoxHeight,
             ),
@@ -1253,7 +1258,7 @@ class pyG5AIWidget(pyG5Widget):
         # draw the TAS box
         rect = QRectF(
             0,
-            g5Height - tasHeight,
+            G5_HEIGHT - tasHeight,
             speedBoxLeftAlign + speedBoxWdith + 15,
             tasHeight,
         )
@@ -1276,9 +1281,9 @@ class pyG5AIWidget(pyG5Widget):
         self.qp.drawRect(
             QRectF(
                 speedBoxLeftAlign + speedBoxWdith + 15,
-                g5CenterY,
+                G5_CENTER_Y,
                 speedDeltaWidth,
-                -2 * (self._kiasDelta * 10) / tapeScale * g5CenterY,
+                -2 * (self._kiasDelta * 10) / tapeScale * G5_CENTER_Y,
             )
         )
 
@@ -1291,7 +1296,7 @@ class pyG5AIWidget(pyG5Widget):
         altBoxWdith = 75
         altBoxSpikedimension = 10
         altTapeScale = 300
-        altTapeLeftAlign = g5Width - altBoxRightAlign - altBoxWdith
+        altTapeLeftAlign = G5_WIDTH - altBoxRightAlign - altBoxWdith
         altSettingHeight = 30
 
         vsScale = 30
@@ -1301,7 +1306,7 @@ class pyG5AIWidget(pyG5Widget):
         self.setPen(0, Qt.GlobalColor.transparent)
         self.qp.setBrush(QBrush(QColor(0, 0, 0, 90)))
         self.qp.drawRect(
-            QRectF(alttapteLeftBound, 0, g5Width - alttapteLeftBound, int(g5Height))
+            QRectF(alttapteLeftBound, 0, G5_WIDTH - alttapteLeftBound, int(G5_HEIGHT))
         )
         self.setPen(2, Qt.GlobalColor.white)
 
@@ -1315,16 +1320,16 @@ class pyG5AIWidget(pyG5Widget):
         currentTape = vsScale
 
         while currentTape >= 0:
-            tapeHeight = (vsScale - currentTape) / vsScale * g5Height
+            tapeHeight = (vsScale - currentTape) / vsScale * G5_HEIGHT
             if (currentTape % 5) == 0:
 
                 self.qp.drawLine(
-                    QPointF(g5Width - 10, tapeHeight),
-                    QPointF(g5Width, tapeHeight),
+                    QPointF(G5_WIDTH - 10, tapeHeight),
+                    QPointF(G5_WIDTH, tapeHeight),
                 )
                 self.qp.drawText(
                     QRectF(
-                        g5Width - 30,
+                        G5_WIDTH - 30,
                         tapeHeight - 5,
                         15,
                         vsIndicatorWidth + 3,
@@ -1334,14 +1339,14 @@ class pyG5AIWidget(pyG5Widget):
                 )
             else:
                 self.qp.drawLine(
-                    QPointF(g5Width - vsIndicatorWidth, tapeHeight),
-                    QPointF(g5Width, tapeHeight),
+                    QPointF(G5_WIDTH - vsIndicatorWidth, tapeHeight),
+                    QPointF(G5_WIDTH, tapeHeight),
                 )
 
             currentTape -= 1
         # tapeHeight = (vsScale - currentTape) / vsScale * g5Height
-        vsHeight = -self._vh_ind_fpm / 100 / vsScale * g5Height
-        vsRect = QRectF(g5Width, g5CenterY, -vsIndicatorWidth, vsHeight)
+        vsHeight = -self._vh_ind_fpm / 100 / vsScale * G5_HEIGHT
+        vsRect = QRectF(G5_WIDTH, G5_CENTER_Y, -vsIndicatorWidth, vsHeight)
 
         self.setPen(0, Qt.GlobalColor.transparent)
 
@@ -1364,14 +1369,13 @@ class pyG5AIWidget(pyG5Widget):
             if (currentTape % 20) == 0:
 
                 tapeHeight = (
-                    1 - 2 * (currentTape - self._altitude) / altTapeScale
-                ) * g5CenterY
+                                     1 - 2 * (currentTape - self._altitude) / altTapeScale
+                             ) * G5_CENTER_Y
                 self.qp.drawLine(
                     QPointF(altTapeLeftAlign - 1.5 * altBoxSpikedimension, tapeHeight),
                     QPointF(altTapeLeftAlign - altBoxSpikedimension / 2, tapeHeight),
                 )
                 if (currentTape % 100) == 0:
-
                     self.qp.drawText(
                         QRectF(
                             altTapeLeftAlign,
@@ -1387,28 +1391,28 @@ class pyG5AIWidget(pyG5Widget):
 
         altBox = QPolygonF(
             [
-                QPointF(g5Width - altBoxRightAlign, g5CenterY - altBoxHeight / 2),
+                QPointF(G5_WIDTH - altBoxRightAlign, G5_CENTER_Y - altBoxHeight / 2),
                 QPointF(
                     altTapeLeftAlign,
-                    g5CenterY - altBoxHeight / 2,
+                    G5_CENTER_Y - altBoxHeight / 2,
                 ),
                 QPointF(
                     altTapeLeftAlign,
-                    g5CenterY - altBoxSpikedimension,
+                    G5_CENTER_Y - altBoxSpikedimension,
                 ),
                 QPointF(
                     altTapeLeftAlign - altBoxSpikedimension,
-                    g5CenterY,
+                    G5_CENTER_Y,
                 ),
                 QPointF(
                     altTapeLeftAlign,
-                    g5CenterY + altBoxSpikedimension,
+                    G5_CENTER_Y + altBoxSpikedimension,
                 ),
                 QPointF(
                     altTapeLeftAlign,
-                    g5CenterY + altBoxHeight / 2,
+                    G5_CENTER_Y + altBoxHeight / 2,
                 ),
-                QPointF(g5Width - altBoxRightAlign, g5CenterY + altBoxHeight / 2),
+                QPointF(G5_WIDTH - altBoxRightAlign, G5_CENTER_Y + altBoxHeight / 2),
             ]
         )
 
@@ -1420,7 +1424,7 @@ class pyG5AIWidget(pyG5Widget):
         self.qp.drawText(
             QRectF(
                 altTapeLeftAlign,
-                g5CenterY - altBoxHeight / 2,
+                G5_CENTER_Y - altBoxHeight / 2,
                 altBoxWdith,
                 altBoxHeight,
             ),
@@ -1435,8 +1439,8 @@ class pyG5AIWidget(pyG5Widget):
         leftAlign = altTapeLeftAlign - 1.5 * altBoxSpikedimension
         rect = QRectF(
             leftAlign,
-            g5Height - altSettingHeight,
-            g5Width - leftAlign,
+            G5_HEIGHT - altSettingHeight,
+            G5_WIDTH - leftAlign,
             altSettingHeight,
         )
         self.qp.drawRect(rect)
@@ -1461,12 +1465,12 @@ class pyG5AIWidget(pyG5Widget):
         self.setPen(1, QColor(0, 0, 0, 127))
 
         self.qp.drawLine(
-            QPointF(g5CenterX, g5Height - turnrateHeight),
-            QPointF(g5CenterX, g5Height),
+            QPointF(G5_CENTER_X, G5_HEIGHT - turnrateHeight),
+            QPointF(G5_CENTER_X, G5_HEIGHT),
         )
         self.qp.drawLine(
-            QPointF(g5CenterX - turnrateHalfWidth, g5Height - turnrateHeight),
-            QPointF(g5CenterX + turnrateHalfWidth, g5Height - turnrateHeight),
+            QPointF(G5_CENTER_X - turnrateHalfWidth, G5_HEIGHT - turnrateHeight),
+            QPointF(G5_CENTER_X + turnrateHalfWidth, G5_HEIGHT - turnrateHeight),
         )
 
         self.setPen(0, Qt.GlobalColor.transparent)
@@ -1474,8 +1478,8 @@ class pyG5AIWidget(pyG5Widget):
         brush = QBrush(QColor(Qt.GlobalColor.magenta))
         self.qp.setBrush(brush)
         rect = QRectF(
-            g5CenterX,
-            g5Height - turnrateHeight + 1,
+            G5_CENTER_X,
+            G5_HEIGHT - turnrateHeight + 1,
             min(max(self._turnRate, -73), 73) / 32 * turnrateHalfWidth,
             turnrateHeight - 2,
         )
@@ -1484,12 +1488,12 @@ class pyG5AIWidget(pyG5Widget):
         self.setPen(1, QColor(255, 255, 255, 128))
 
         self.qp.drawLine(
-            QPointF(g5CenterX - turnrateHalfWidth, g5Height - turnrateHeight),
-            QPointF(g5CenterX - turnrateHalfWidth, g5Height),
+            QPointF(G5_CENTER_X - turnrateHalfWidth, G5_HEIGHT - turnrateHeight),
+            QPointF(G5_CENTER_X - turnrateHalfWidth, G5_HEIGHT),
         )
         self.qp.drawLine(
-            QPointF(g5CenterX + turnrateHalfWidth, g5Height - turnrateHeight),
-            QPointF(g5CenterX + turnrateHalfWidth, g5Height),
+            QPointF(G5_CENTER_X + turnrateHalfWidth, G5_HEIGHT - turnrateHeight),
+            QPointF(G5_CENTER_X + turnrateHalfWidth, G5_HEIGHT),
         )
 
         # slip ball
@@ -1500,7 +1504,7 @@ class pyG5AIWidget(pyG5Widget):
 
         self.qp.drawRect(
             QRectF(
-                g5CenterX - slipballRadius,
+                G5_CENTER_X - slipballRadius,
                 slipballHeigh - slipballRadius,
                 -slipballMarkeWidth,
                 2 * slipballRadius,
@@ -1508,7 +1512,7 @@ class pyG5AIWidget(pyG5Widget):
         )
         self.qp.drawRect(
             QRectF(
-                g5CenterX + slipballRadius,
+                G5_CENTER_X + slipballRadius,
                 slipballHeigh - slipballRadius,
                 slipballMarkeWidth,
                 2 * slipballRadius,
@@ -1516,10 +1520,10 @@ class pyG5AIWidget(pyG5Widget):
         )
         # set slip ball gradian
         grad = QRadialGradient(
-            g5CenterX - self._slip * slipballMovementMax * slipballMovementWdith,
+            G5_CENTER_X - self._slip * slipballMovementMax * slipballMovementWdith,
             slipballHeigh,
             slipballRadius,
-            g5CenterX - self._slip * slipballMovementMax * slipballMovementWdith,
+            G5_CENTER_X - self._slip * slipballMovementMax * slipballMovementWdith,
             slipballHeigh,
         )
         grad.setColorAt(0, QColor(255, 255, 255, 200))
@@ -1529,13 +1533,14 @@ class pyG5AIWidget(pyG5Widget):
         self.qp.drawEllipse(
             QPoint(
                 int(
-                    g5CenterX - self._slip * slipballMovementMax * slipballMovementWdith
+                    G5_CENTER_X - self._slip * slipballMovementMax * slipballMovementWdith
                 ),
                 int(slipballHeigh),
             ),
             slipballRadius,
             slipballRadius,
         )
+        self.draw_glideslope(12, 172, 100, Qt.GlobalColor.white, G5_CENTER_Y)
 
         self.qp.end()
 

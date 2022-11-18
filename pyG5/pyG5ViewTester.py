@@ -6,8 +6,8 @@ Created on 8 Aug 2021.
 
 import sys
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
+from qtpy.QtCore import Qt
+from qtpy.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QGridLayout,
@@ -20,12 +20,11 @@ from PyQt6.QtWidgets import (
     QWidget,
     QScrollArea,
 )
-from PyQt6.QtGui import (
+from qtpy.QtWidgets import (
     QAction,
-
 )
 
-from pyG5.pyG5View import pyG5DualStack, g5Width, g5Height
+from pyG5.pyG5View import pyG5DualStack, G5_WIDTH, G5_HEIGHT
 
 sliderWdith = 300
 
@@ -83,7 +82,7 @@ if __name__ == "__main__":
     w = QMainWindow()
 
     # Set window size.
-    w.resize(sliderWdith + g5Width, g5Height)
+    w.resize(sliderWdith + G5_WIDTH, G5_HEIGHT)
 
     # Set window title
     w.setWindowTitle("Garmin G5")

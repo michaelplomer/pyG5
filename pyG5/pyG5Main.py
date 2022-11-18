@@ -13,9 +13,9 @@ import platform
 import sys
 
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QFontDatabase
-from PyQt6.QtWidgets import (
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QFont, QFontDatabase
+from qtpy.QtWidgets import (
     QApplication,
     QMainWindow,
     QMenu,
