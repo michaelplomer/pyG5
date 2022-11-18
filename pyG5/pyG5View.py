@@ -211,8 +211,6 @@ class pyG5Widget(QWidget):
             self.gs_available = self._nav1gsavailable
             self.gs_dev = self._nav1gs
 
-        print("Derived settings : " + str(self.nav_color))
-
     def getNavTypeString(self, navType, navIndex):
         """getNavTypeString.
 
@@ -327,7 +325,6 @@ class pyG5HSIWidget(pyG5Widget):
         self.derive_settings()
         self.qp = QPainter(self)
 
-        print("start of paint event : " + str(self.nav_color))
         rotatinghsiCircleRadius = 160
         hsiCircleRadius = 90
         hsiTextRadius = 120
@@ -455,7 +452,6 @@ class pyG5HSIWidget(pyG5Widget):
 
         self.setPen(1, Qt.GlobalColor.black)
 
-        print("CDI : " + str(self.nav_color))
         self.qp.setBrush(QBrush(self.nav_color))
         # Draw the CDI
         self.qp.rotate(90 - self._headingBug + self.nav_crs)
